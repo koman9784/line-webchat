@@ -1,6 +1,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
+import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export async function POST(request: NextRequest) {
   try {
@@ -9,15 +10,15 @@ export async function POST(request: NextRequest) {
 
     if (!channelSecret || !signature) {
       return NextResponse.json(
-        { success: false, error: "Missing signature configuration" },
+        { error: "Missing signature configuration" },
         { status: 401 }
       );
     }
 
-    // อ่าน Raw Body ก่อนแปลงเป็น JSON
+    // 1. อ่าน Raw Body
     const rawBody = await request.text();
 
-    // สร้าง Signature เพื่อตรวจสอบ
+    // 2. ตรวจสอบ LINE Signature
     const expectedSignature = createHmac("sha256", channelSecret)
       .update(rawBody)
       .digest("base64");
@@ -30,23 +31,75 @@ export async function POST(request: NextRequest) {
       !timingSafeEqual(received, expected)
     ) {
       return NextResponse.json(
-        { success: false, error: "Invalid signature" },
+        { error: "Invalid signature" },
         { status: 401 }
       );
     }
 
+    // 3. แปลง JSON
     const body = JSON.parse(rawBody);
 
+    // 4. วนอ่าน Event
     for (const event of body.events ?? []) {
-      const userId = event.source?.userId;
-
+      // สนใจเฉพาะข้อความตัวอักษรจากผู้ใช้
       if (
-        event.type === "message" &&
-        event.message?.type === "text"
+        event.type !== "message" ||
+        event.message?.type !== "text"
       ) {
-        console.log("LINE User ID:", userId);
-        console.log("Message:", event.message.text);
+        continue;
       }
+
+      const userId = event.source?.userId;
+      const message = event.message.text;
+      const eventId = event.webhookEventId;
+
+      if (!userId || typeof message !== "string") {
+        continue;
+      }
+
+      // 5. สร้างห้องสนทนา หรือใช้ห้องเดิม
+      const { data: conversation, error: conversationError } =
+        await supabaseAdmin
+          .from("conversations")
+          .upsert(
+            {
+              line_user_id: userId,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "line_user_id" }
+          )
+          .select("id")
+          .single();
+
+      if (conversationError) {
+        throw conversationError;
+      }
+
+      // 6. บันทึกข้อความ
+      const { error: messageError } = await supabaseAdmin
+        .from("messages")
+        .upsert(
+          {
+            conversation_id: conversation.id,
+            content: message,
+            sender: "customer",
+            channel: "line",
+            external_event_id: eventId ?? null,
+          },
+          {
+            onConflict: "external_event_id",
+            ignoreDuplicates: true,
+          }
+        );
+
+      if (messageError) {
+        throw messageError;
+      }
+
+      console.log("Message saved:", {
+        userId,
+        eventId,
+      });
     }
 
     return NextResponse.json({ success: true });
