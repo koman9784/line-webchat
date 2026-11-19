@@ -1,21 +1,51 @@
 
 import { NextRequest, NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "crypto";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const channelSecret = process.env.LINE_CHANNEL_SECRET;
+    const signature = request.headers.get("x-line-signature");
 
-    // วนอ่าน Event ที่ LINE ส่งเข้ามา
+    if (!channelSecret || !signature) {
+      return NextResponse.json(
+        { success: false, error: "Missing signature configuration" },
+        { status: 401 }
+      );
+    }
+
+    // อ่าน Raw Body ก่อนแปลงเป็น JSON
+    const rawBody = await request.text();
+
+    // สร้าง Signature เพื่อตรวจสอบ
+    const expectedSignature = createHmac("sha256", channelSecret)
+      .update(rawBody)
+      .digest("base64");
+
+    const received = Buffer.from(signature, "base64");
+    const expected = Buffer.from(expectedSignature, "base64");
+
+    if (
+      received.length !== expected.length ||
+      !timingSafeEqual(received, expected)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Invalid signature" },
+        { status: 401 }
+      );
+    }
+
+    const body = JSON.parse(rawBody);
+
     for (const event of body.events ?? []) {
-      // ดึง LINE User ID
       const userId = event.source?.userId;
 
-      // ตรวจสอบว่าเป็นข้อความหรือไม่
-      if (event.type === "message" && event.message?.type === "text") {
-        const message = event.message.text;
-
+      if (
+        event.type === "message" &&
+        event.message?.type === "text"
+      ) {
         console.log("LINE User ID:", userId);
-        console.log("Message:", message);
+        console.log("Message:", event.message.text);
       }
     }
 
