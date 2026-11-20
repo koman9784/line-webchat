@@ -31,7 +31,7 @@ export default function AdminLoginPage() {
       return;
     }
 
-    router.replace("/admin");
+    router.replace("/");
     router.refresh();
   }
 
