@@ -2,6 +2,50 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getLineUserProfile } from "@/services/line.service";
+
+const PROFILE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+type ProfileConversation = {
+  id: string;
+  line_user_id: string;
+  profile_checked_at: string | null;
+};
+
+async function refreshConversationProfile(conversation: ProfileConversation) {
+  const now = new Date();
+  const cutoffTime = now.getTime() - PROFILE_REFRESH_INTERVAL_MS;
+  const cutoff = new Date(cutoffTime).toISOString();
+  if (conversation.profile_checked_at && Date.parse(conversation.profile_checked_at) > cutoffTime) return;
+
+  // Atomically throttle profile requests across concurrent webhook deliveries.
+  const claim = supabaseAdmin.from("conversations")
+    .update({ profile_checked_at: now.toISOString() }).eq("id", conversation.id);
+  const { data: claimed, error: claimError } = await (
+    conversation.profile_checked_at === null
+      ? claim.is("profile_checked_at", null)
+      : claim.lte("profile_checked_at", cutoff)
+  ).select("id").maybeSingle();
+  if (claimError) {
+    console.error("Unable to schedule LINE profile refresh", { code: claimError.code });
+    return;
+  }
+  if (!claimed) return;
+
+  try {
+    const profile = await getLineUserProfile(conversation.line_user_id);
+    const { error } = await supabaseAdmin.from("conversations").update({
+      display_name: profile.displayName,
+      picture_url: profile.pictureUrl ?? null,
+    }).eq("id", conversation.id);
+    if (error) console.error("Unable to save LINE profile", { code: error.code });
+  } catch (error) {
+    // Profile enrichment is optional; the message has already been saved.
+    console.error("LINE profile refresh failed; existing profile retained", {
+      errorType: error instanceof Error ? error.name : "UnknownError",
+    });
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -68,7 +112,7 @@ export async function POST(request: NextRequest) {
             },
             { onConflict: "line_user_id" }
           )
-          .select("id")
+          .select("id, line_user_id, profile_checked_at")
           .single();
 
       if (conversationError) {
@@ -96,10 +140,9 @@ export async function POST(request: NextRequest) {
         throw messageError;
       }
 
-      console.log("Message saved:", {
-        userId,
-        eventId,
-      });
+      await refreshConversationProfile(conversation);
+
+      console.log("Message saved");
     }
 
     return NextResponse.json({ success: true });

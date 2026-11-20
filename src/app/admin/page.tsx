@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowser } from "@/lib/supabase-browser";
+import ConversationAvatar from "@/components/admin/ConversationAvatar";
 
 type Conversation = {
   id: string;
   line_user_id: string;
+  display_name: string | null;
+  picture_url: string | null;
   updated_at: string;
 };
 
@@ -25,7 +28,8 @@ export default function AdminPage() {
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
-  const [selected, setSelected] = useState<Conversation | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -77,42 +81,51 @@ export default function AdminPage() {
 
   useEffect(() => {
     let active = true;
-
-    loadConversations().then((loadedConversations) => {
+    const applyConversations = (loadedConversations: Conversation[] | null) => {
       if (active && loadedConversations !== null) {
         setConversations(loadedConversations);
         setLoading(false);
       }
-    });
+    };
+    loadConversations().then(applyConversations);
+
+    const channel = supabase.channel("admin-conversations").on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "conversations" },
+      () => {
+        if (active) loadConversations().then(applyConversations);
+      },
+    ).subscribe();
 
     return () => {
       active = false;
+      supabase.removeChannel(channel);
     };
-  }, [loadConversations]);
+  }, [loadConversations, supabase]);
 
   // เมื่อเลือกห้อง ให้โหลดข้อความและสมัคร Realtime
   useEffect(() => {
-    if (!selected) {
+    if (!selectedId) {
       return;
     }
 
     let active = true;
 
-    loadMessages(selected.id).then((loadedMessages) => {
+    loadMessages(selectedId).then((loadedMessages) => {
       if (active && loadedMessages !== null) {
         setMessages(loadedMessages);
       }
     });
 
     const channel = supabase
-      .channel(`messages-${selected.id}`)
+      .channel(`messages-${selectedId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "messages",
-          filter: `conversation_id=eq.${selected.id}`,
+          filter: `conversation_id=eq.${selectedId}`,
         },
         (payload) => {
           if (!active) return;
@@ -126,12 +139,6 @@ export default function AdminPage() {
 
             return [...current, newMessage];
           });
-
-          loadConversations().then((loadedConversations) => {
-            if (active && loadedConversations !== null) {
-              setConversations(loadedConversations);
-            }
-          });
         },
       )
       .subscribe();
@@ -140,7 +147,7 @@ export default function AdminPage() {
       active = false;
       supabase.removeChannel(channel);
     };
-  }, [selected, supabase, loadMessages, loadConversations]);
+  }, [selectedId, supabase, loadMessages]);
 
   // ส่งข้อความตอบกลับ
   async function handleSend() {
@@ -238,7 +245,7 @@ export default function AdminPage() {
               onClick={() => {
                 if (selected?.id === conversation.id) return;
                 setMessages([]);
-                setSelected(conversation);
+                setSelectedId(conversation.id);
               }}
               aria-pressed={selected?.id === conversation.id}
               className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 ${
@@ -247,16 +254,14 @@ export default function AdminPage() {
                   : "border-transparent hover:border-slate-200 hover:bg-slate-50"
               }`}
             >
-              <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-xl text-sm font-bold ${
-                selected?.id === conversation.id
-                  ? "bg-emerald-600 text-white"
-                  : "bg-sky-100 text-sky-700"
-              }`}>
-                {conversation.line_user_id.slice(0, 2).toUpperCase()}
-              </span>
+              <ConversationAvatar
+                name={conversation.display_name ?? conversation.line_user_id}
+                pictureUrl={conversation.picture_url}
+                active={selectedId === conversation.id}
+              />
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold">
-                  {conversation.line_user_id}
+                  {conversation.display_name ?? conversation.line_user_id}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
                   {new Date(conversation.updated_at).toLocaleString()}
@@ -271,9 +276,16 @@ export default function AdminPage() {
         <section aria-label="หน้าต่างแชต" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           {selected ? (
             <>
-              <div className="shrink-0 border-b border-slate-100 bg-white px-5 py-4">
-                <p className="text-xs font-medium text-emerald-700">กำลังสนทนากับ</p>
-                <h2 className="mt-1 break-all font-semibold">{selected.line_user_id}</h2>
+              <div className="flex shrink-0 items-center gap-3 border-b border-slate-100 bg-white px-5 py-4">
+                <ConversationAvatar
+                  name={selected.display_name ?? selected.line_user_id}
+                  pictureUrl={selected.picture_url}
+                  active
+                />
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-emerald-700">กำลังสนทนากับ</p>
+                  <h2 className="mt-1 break-all font-semibold">{selected.display_name ?? selected.line_user_id}</h2>
+                </div>
               </div>
 
               <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-gradient-to-b from-slate-50 to-emerald-50/40 p-4 sm:p-6">
